@@ -1,0 +1,228 @@
+Bert model on deve Abusive
+{'accuracy': 0.7157190635451505, 'precision': 0.6588235294117647, 'recall': 0.8057553956834532, 'f1': 0.7249190938511327}
+Bert model on deve malayamala
+{'accuracy': 0.5071542130365659, 'precision': 0.49355432780847147, 'recall': 0.8844884488448845, 'f1': 0.6335697399527187}
+{'accuracy': 0.5071542130365659, 'precision': 0.49355432780847147, 'recall': 0.8844884488448845, 'f1': 0.6335697399527187}
+Bert on malayamal training data
+{'accuracy': 0.9567901234567902, 'precision': 0.9247311827956989, 'recall': 1.0, 'f1': 0.9608938547486033}
+===============================================================================================
+# Code to save a fine-tuned model and test it with external test data works.....LLM...for training
+import pandas as pd
+import re
+from datasets import Dataset
+from transformers import BertTokenizer, BertForSequenceClassification, Trainer, TrainingArguments
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+# Load and preprocess the dataset
+file_path = '/content/drive/MyDrive/shared 2025/Detecting AI generated content/mal_training_data_hum_ai.csv'
+df = pd.read_csv(file_path)
+
+
+# Fill missing values and ensure labels are integers
+df['LABEL'] = df['LABEL'].map({'AI': 1, 'HUMAN': 0})
+df['LABEL'] = df['LABEL'].fillna(0).astype(int)
+
+# Text preprocessing function
+def preprocess_text(text):
+    text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)  # Remove URLs
+    text = re.sub(r'[@#&]', '', text)  # Remove special characters
+    text = re.sub(r'\s+', ' ', text).strip()  # Normalize spaces
+    return text.lower()
+
+# Apply text preprocessing
+df['text'] = df['DATA'].apply(preprocess_text)
+df.rename(columns={'LABEL': 'labels'}, inplace=True)
+
+# Convert to Hugging Face Dataset
+dataset = Dataset.from_pandas(df)
+
+# Initialize tokenizer and model
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+model = BertForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2)
+
+# Tokenization function
+def tokenize_function(examples):
+    return tokenizer(examples['text'], padding="max_length", truncation=True, max_length=128)
+
+# Apply tokenization and format dataset
+tokenized_datasets = dataset.map(tokenize_function, batched=True)
+#tokenized_datasets = tokenized_datasets.remove_columns(['text', 'Text'])  # Remove unnecessary fields
+tokenized_datasets.set_format("torch")  # Convert to PyTorch tensors
+
+# Define evaluation metrics
+def compute_metrics(pred):
+    labels = pred.label_ids
+    preds = pred.predictions.argmax(-1)
+    return {
+        "accuracy": accuracy_score(labels, preds),
+        "precision": precision_score(labels, preds, average='binary'),
+        "recall": recall_score(labels, preds, average='binary'),
+        "f1": f1_score(labels, preds, average='binary')
+    }
+
+# Set up training arguments
+training_args = TrainingArguments(
+    output_dir="./results_outputs",
+    learning_rate=1e-5,
+    per_device_train_batch_size=32,
+    num_train_epochs=10,
+    weight_decay=0.01,
+    logging_dir="./logs",
+    save_strategy="epoch",
+    save_total_limit=2,
+)
+
+# Initialize the Trainer
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_datasets,  # Use all data for training
+    compute_metrics=compute_metrics,
+)
+
+# Train the model
+trainer.train()
+
+# Save the model and tokenizer
+trained_model_path = '/content/drive/MyDrive/shared 2025/Detecting AI generated content/fine_tuned_bert_model308'
+trainer.save_model(trained_model_path)
+tokenizer.save_pretrained(trained_model_path)
+
+print(f"Model and tokenizer saved at: {trained_model_path}")
+=================================================================================================
+## Code to test the fine-tuned model on the development dataset
+import pandas as pd
+import torch
+import re
+from transformers import BertTokenizer, BertForSequenceClassification
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+deve_path = '/content/drive/MyDrive/shared 2025/Detecting AI generated content/testM.csv'
+
+# Load the test data
+df = pd.read_csv(deve_path)
+df = df.dropna()  # Drop rows with missing values
+
+# Load the fine-tuned model and tokenizer
+trained_model_path = '/content/drive/MyDrive/shared 2025/Detecting AI generated content/fine_tuned_bert_model308'
+tokenizer = BertTokenizer.from_pretrained(trained_model_path)
+model = BertForSequenceClassification.from_pretrained(trained_model_path)
+model.eval()
+
+# Extract true labels
+df['LABEL'] = df['LABEL'].map({'AI': 1, 'HUMAN': 0})
+df['LABEL'] = df['LABEL'].fillna(0)
+y_true = df['LABEL'].astype(int)
+
+# Text preprocessing function
+def preprocess_text(text):
+    text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)  # Remove URLs
+    text = re.sub(r'[@#&]', '', text)  # Remove special characters
+    text = re.sub(r'\s+', ' ', text).strip()  # Normalize spaces
+    return text.lower()
+
+# Preprocess text column
+df['text'] = df['DATA'].apply(preprocess_text)
+
+# Tokenize the development data
+test_encodings = tokenizer(
+    df['text'].tolist(),
+    truncation=True,
+    padding=True,
+    max_length=128,
+    return_tensors="pt"
+)
+
+# Create a DataLoader for the test data
+test_dataset = torch.utils.data.TensorDataset(
+    test_encodings['input_ids'], test_encodings['attention_mask']
+)
+test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+# Predict the test set
+test_preds = []
+with torch.no_grad():
+    for i, batch in enumerate(test_loader):
+        print(f"Processing batch {i+1} with size {len(batch[0])}")  # Debug batch size
+        input_ids, attention_mask = batch
+        input_ids, attention_mask = input_ids.to(model.device), attention_mask.to(model.device)
+        outputs = model(input_ids, attention_mask=attention_mask)
+        logits = outputs.logits
+        preds = torch.argmax(logits, dim=1).cpu().numpy()
+        test_preds.extend(preds)
+
+# Calculate metrics
+result = {
+    'accuracy': accuracy_score(y_true, test_preds),
+    'precision': precision_score(y_true, test_preds),
+    'recall': recall_score(y_true, test_preds),
+    'f1': f1_score(y_true, test_preds)
+}
+print(result)
+===================================================================================================
+#to test the extranal dataset
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader, TensorDataset
+from transformers import BertTokenizer, BertForSequenceClassification
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+# Load test dataset
+test_path = '/content/drive/MyDrive/shared 2025/Detecting AI generated content/mal_test_data_hum_ai .csv'
+t_df = pd.read_csv(test_path)
+t_df=t_df.dropna(subset=['DATA'])
+test = t_df['DATA']
+
+# Load the trained model and tokenizer
+trained_model_path = '/content/drive/MyDrive/shared 2025/Detecting AI generated content/fine_tuned_bert_model308'
+tokenizer = BertTokenizer.from_pretrained(trained_model_path)
+model = BertForSequenceClassification.from_pretrained(trained_model_path)
+model.eval()
+# Clean the test data
+t_df = t_df.dropna(subset=['DATA'])  # Drop rows where 'DATA' is NaN
+test = t_df['DATA'].apply(lambda x: x.strip() if isinstance(x, str) else x)  # Strip spaces
+test = test[test != '']  # Remove empty strings
+print(f"Number of valid test samples: {len(test)}")
+
+# Tokenize the test data
+test_encodings = tokenizer(
+    test.tolist(),
+    truncation=True,
+    padding=True,
+    max_length=128,
+    return_tensors="pt"
+)
+
+# Convert the test data into a suitable format
+test_dataset = TensorDataset(
+    test_encodings['input_ids'], test_encodings['attention_mask']
+)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+# Initialize an empty list to store predictions
+y_pred = []
+
+# Predict the test set
+with torch.no_grad():
+    for i, batch in enumerate(test_loader):
+        print(f"Processing batch {i+1} with size {len(batch[0])}")  # Debug batch size
+        input_ids, attention_mask = batch
+        input_ids, attention_mask = input_ids.to(model.device), attention_mask.to(model.device)
+        outputs = model(input_ids, attention_mask=attention_mask)
+        logits = outputs.logits
+        preds = torch.argmax(logits, dim=1).cpu().numpy()
+        y_pred.extend(preds)  # Append predictions from the batch
+
+# Convert y_pred to a pandas Series
+y_pred_series = pd.Series(y_pred)
+
+# Add predictions to the DataFrame
+t_df['LABEL'] = y_pred_series
+# Change numerical predictions back to labels
+t_df['LABEL'] = t_df['LABEL'].map({1: 'AI', 0: 'HUMAN'})
+
+# Save the results to a file
+output_path = '/content/drive/MyDrive/shared 2025/Detecting AI generated content/finetunedresult2.tsv'
+t_df.to_csv(output_path, sep='\t', index=False)
+print(f"Predictions saved to {output_path}")
+
